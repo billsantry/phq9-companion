@@ -1,11 +1,15 @@
+/* Google Fonts: Roboto */
+@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap');
+
 :root {
-  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
+  font-family: 'Roboto', system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif;
   line-height: 1.5;
   font-weight: 400;
 
+  /* Keep dark by default; App.jsx sets solid bg color */
   color-scheme: light dark;
   color: rgba(255, 255, 255, 0.87);
-  background-color: #242424;
+  background-color: #0b1220;
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -13,21 +17,26 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* prevent layout jitter from global center-flex */
+body {
+  margin: 0;
+  display: block;           /* was: flex */
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+/* optional: stabilize overall box sizing */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
 a {
   font-weight: 500;
-  color: #646cff;
+  color: #7dd3fc;
   text-decoration: inherit;
 }
 a:hover {
-  color: #535bf2;
-}
-
-body {
-  margin: 0;
-  display: flex;
-  place-items: center;
-  min-width: 320px;
-  min-height: 100vh;
+  color: #93e2ff;
 }
 
 h1 {
@@ -46,23 +55,41 @@ button {
   cursor: pointer;
   transition: border-color 0.25s;
 }
-button:hover {
-  border-color: #646cff;
-}
+button:hover { border-color: #646cff; }
 button:focus,
-button:focus-visible {
-  outline: 4px auto -webkit-focus-ring-color;
-}
+button:focus-visible { outline: 4px auto -webkit-focus-ring-color; }
 
+/* Light-mode override remains, but we keep page bg solid on App.jsx */
 @media (prefers-color-scheme: light) {
   :root {
     color: #213547;
     background-color: #ffffff;
   }
-  a:hover {
-    color: #747bff;
-  }
-  button {
-    background-color: #f9f9f9;
-  }
+  a:hover { color: #747bff; }
+  button { background-color: #f9f9f9; }
+}
+
+/* 🖥️ Widescreen viewports: improve readability */
+@media screen and (min-width: 1600px) {
+  body { font-size: 18px; }
+}
+
+/* PHQ-9 option “tap” feedback (quick press animation) */
+.phq-option {
+  transition: transform 140ms ease, box-shadow 140ms ease, background-color 140ms ease;
+  will-change: transform;
+}
+
+/* On press: subtle scale + inner glow */
+.phq-option:active {
+  transform: scale(0.98);
+  box-shadow: inset 0 0 0 9999px rgba(125, 211, 252, 0.08);
+}
+
+/* Keyboard users get a visible focus ring without moving layout */
+.phq-option:focus-visible {
+  outline: 0;
+  box-shadow:
+    0 0 0 2px rgba(125, 211, 252, 0.6),
+    0 0 0 6px rgba(125, 211, 252, 0.15);
 }

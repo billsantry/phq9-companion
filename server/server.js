@@ -15,7 +15,7 @@ app.use(express.json({ limit: '1mb' }));
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const DEFAULT_MODEL = process.env.OPENAI_MODEL || 'gpt-5-chat-latest';
 
-// ---------- Hard guardrails (mirror app.jsx) ----------
+// ---------- Hard guardrails (mirror client) ----------
 const SYSTEM_HARD_LIKERT = `
 You are “Wellbeing PulseCheck,” a non-diagnostic clinical assistant.
 
@@ -93,7 +93,6 @@ function sanitizeQuestionText(text) {
   const tooLong = one.length > 240 || (one.match(/[.?!]/g) || []).length > 1;
 
   if ((containsChoices || looksListy || tooLong) && endsWithQ) {
-    // generic, safe fallback prompt (client also has canonical wording)
     return 'Over the last 2 weeks, how often have you been bothered by this area?';
   }
   return one;
@@ -112,27 +111,31 @@ app.post('/api/llm', async (req, res) => {
       return res.status(400).json({ error: '"messages" array required' });
     }
 
-    // Crisis guard: scan recent user turns
-    const lastUserTurns = messages.filter(m => m?.role === 'user').slice(-4);
-    const recentUserText = lastUserTurns.map(m => m?.content || '').join('\n');
-    if (containsRiskLanguage(recentUserText)) {
-      return res.json({ reply: 'If you’re in the U.S., call 988 (or 911 if in immediate danger).' });
+    // ✅ Detect "summary phase" BEFORE crisis guard so we don't suppress guidance.
+    const SUMMARY_HINT_RX =
+      /(PHQ-9 Companion|pre-diagnostic wellbeing companion|Guidance.+low-risk self-care|SI>0.*988|PHQ-9 total\s*:|Write the guidance|Create the 4–7 sentence guidance)/i;
+
+    const clientHasSummaryOnly = messages.some(m => SUMMARY_HINT_RX.test(m?.content || ''));
+
+    // ✅ Apply crisis guard ONLY on interactive/question turns (not during summary).
+    if (!clientHasSummaryOnly) {
+      const lastUserTurns = messages.filter(m => m?.role === 'user').slice(-4);
+      const recentUserText = lastUserTurns.map(m => m?.content || '').join('\n');
+      if (containsRiskLanguage(recentUserText)) {
+        return res.json({ reply: 'If you’re in the U.S., call 988 (or 911 if in immediate danger).' });
+      }
     }
 
-    // Decide which system prompt to prepend.
-    // If the client already sent SYSTEM_SUMMARY_ONLY (by content hint), don’t override.
-    const clientHasSummaryOnly = messages.some(
-      m => m?.role === 'system' && /Guidance.+low-risk self-care|SI>0.*988/i.test(m?.content || '')
-    );
-
+    // Choose the system prompt
     const systemToPrepend = clientHasSummaryOnly ? SYSTEM_SUMMARY_ONLY : SYSTEM_HARD_LIKERT;
 
-    // Build final input (prepend our system guardrails)
-    const input = [{ role: 'system', content: systemToPrepend }]
-      .concat(messages.map(m => ({
+    // Build final input
+    const input = [{ role: 'system', content: systemToPrepend }].concat(
+      messages.map(m => ({
         role: typeof m.role === 'string' ? m.role : 'user',
         content: typeof m.content === 'string' ? m.content : String(m.content ?? '')
-      })));
+      }))
+    );
 
     const r = await fetch('https://api.openai.com/v1/responses', {
       method: 'POST',
@@ -143,8 +146,8 @@ app.post('/api/llm', async (req, res) => {
       body: JSON.stringify({
         model: DEFAULT_MODEL,
         input,
-        max_output_tokens: 180, // short Qs, brief reflections, concise guidance
-        temperature: 0.3
+        max_output_tokens: 220,   // ensures full 4–7 sentence guidance
+        temperature: 0.35
       })
     });
 
@@ -157,10 +160,14 @@ app.post('/api/llm', async (req, res) => {
     const data = await r.json();
     let reply = extractReply(data) || '';
 
-    // Soft sanitize if it looks like a one-line question that leaked options
-    // (Client also has stricter sanitization/fallback.)
-    if (reply && reply.trim().endsWith('?')) {
+    // Sanitize ONLY for question turns
+    if (!clientHasSummaryOnly && reply && reply.trim().endsWith('?')) {
       reply = sanitizeQuestionText(reply);
+    }
+
+    // Fallback if model somehow returns nothing during summary
+    if (clientHasSummaryOnly && !reply.trim()) {
+      reply = 'Thanks for completing this check-in. Consider which small changes feel doable this week, and when to check in with a clinician you trust.';
     }
 
     res.json({ reply: reply || '(No response)' });
@@ -168,7 +175,7 @@ app.post('/api/llm', async (req, res) => {
     console.error('💥 LLM backend failed:', err);
     res.status(500).send('LLM backend failed');
   }
-});
+}); // END app.post('/api/llm')
 
 // ---------- Start ----------
 const PORT = process.env.PORT || 3000;

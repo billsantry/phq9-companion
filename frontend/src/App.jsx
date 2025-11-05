@@ -319,14 +319,31 @@ const S = {
     color: "#e5e7eb",
     display: "flex",
     justifyContent: "center",
-    padding: 24,
+    padding: "24px 0",
   },
-  container: { width: "100%", maxWidth: 900 },
+  container: {
+    width: "95vw",           // stretch to nearly full width
+    maxWidth: "1400px",      // allow wide layouts
+    margin: "0 auto",
+  },
   header: { display: "flex", justifyContent: "space-between", marginBottom: 16, alignItems: "center" },
   badge: { marginLeft: 8, fontSize: 12, padding: "2px 8px", border: "1px solid #334155", borderRadius: 8 },
-  card: { padding: 16, border: "1px solid #1f2937", borderRadius: 12, background: "rgba(15,23,42,.7)" },
+  card: {
+    padding: 24,
+    border: "1px solid #1f2937",
+    borderRadius: 12,
+    background: "rgba(15,23,42,.7)",
+    width: "100%",                // make the card expand fully
+    boxSizing: "border-box",
+  },
   scroll: { display: "flex", flexDirection: "column", gap: 8, maxHeight: "65vh", overflow: "auto", paddingRight: 4 },
-  bubble: { maxWidth: "85%", padding: 12, border: "1px solid #334155", borderRadius: 12, whiteSpace: "pre-wrap" },
+  bubble: {
+    maxWidth: "100%",             // was 85%
+    padding: 16,
+    border: "1px solid #334155",
+    borderRadius: 12,
+    whiteSpace: "pre-wrap",
+  },
   bubbleUser: { marginLeft: "auto", background: "rgba(30,41,59,.7)" },
   bubbleAssistant: { background: "rgb(16 20 38)", border: "none" },
   cautionBox: {
