@@ -1,7 +1,7 @@
-# PHQ-9 Companion – Build & Deploy Node + React full-stack app to Azure Web App
+# PHQ-9 Companion — Build and deploy Node/React full-stack app to Azure Web App
 # Docs: https://github.com/Azure/webapps-deploy
 
-name: Build and Deploy – PHQ9 Companion Web
+name: Build and deploy Node.js app to Azure Web App - phq9-companion-web
 
 on:
   push:
@@ -11,7 +11,6 @@ on:
 
 jobs:
   build:
-    name: Build Client & Server
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -20,64 +19,79 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20.x"
-          cache: "npm"
 
-      # --- Build React front-end ---
-      - name: Install & build React client
+      # --- Build React client ---
+      - name: Install and build client
         run: |
           cd client
           npm ci
           npm run build
-        env:
-          CI: false
 
-      # --- Bundle client build with server code ---
-      - name: Copy client build → server
+      # --- Copy build output into server ---
+      - name: Copy client build into server
         run: |
           mkdir -p server/client/dist
           cp -r client/dist/* server/client/dist/
 
-      # --- Upload artifact for deployment ---
-      - name: Upload artifact
+      # --- Upload built app for deployment ---
+      - name: Upload artifact for deployment
         uses: actions/upload-artifact@v4
         with:
-          name: phq9-companion-build
+          name: phq9-app
           path: server/
 
   deploy:
-    name: Deploy to Azure Web App
     runs-on: ubuntu-latest
     needs: build
     permissions:
-      id-token: write      # for OIDC auth
+      id-token: write      # Required for Azure OIDC auth
       contents: read
 
     steps:
-      - name: Download artifact
+      - name: Download artifact from build
         uses: actions/download-artifact@v4
         with:
-          name: phq9-companion-build
+          name: phq9-app
 
-      - name: Login to Azure
+      # --- Login to Azure via OIDC ---
+      - name: Log in to Azure
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_819F70388E9742ECAB05957B5DAF5056 }}
           tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_52FF2E7F0E274BB3BD0FF968D12A8D01 }}
           subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_3449190E74D84FF6BC3D3C538EADF2BA }}
 
+      # --- Verify Azure connection ---
+      - name: Verify Azure connection
+        run: |
+          echo "✅ Azure login successful. Account details:"
+          az account show --output table
+        shell: bash
+
+      # --- Deploy to Azure Web App ---
       - name: Deploy to Azure Web App
-        id: deploy
+        id: deploy-to-webapp
         uses: azure/webapps-deploy@v3
         with:
           app-name: "phq9-companion-web"
           slot-name: "Production"
           package: .
 
-      - name: Verify deployment URL
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+      # --- Post-deployment health check ---
+      - name: Health check
         run: |
-          echo "✅ Deployment complete!"
-          echo "🌐 Visit: https://phq9-companion-web.azurewebsites.net"
+          echo "🩺 Checking app health..."
+          curl -s -o /dev/null -w "%{http_code}" https://phq9-companion-web.azurewebsites.net/health | tee health_status.txt
+          if grep -q "200" health_status.txt; then
+            echo "✅ App responded with HTTP 200 (healthy)."
+          else
+            echo "❌ Health check failed."
+            exit 1
+          fi
