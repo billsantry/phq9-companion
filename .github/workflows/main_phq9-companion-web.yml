@@ -1,8 +1,7 @@
-# PHQ-9 Companion — Full stack build + deploy (React + Node)
-# Uses Azure OIDC authentication for secure CI/CD
+# PHQ-9 Companion — Full Stack Build + Deploy (React + Node)
 # Docs: https://github.com/Azure/webapps-deploy
 
-name: Build and deploy Node.js app to Azure Web App - phq9-companion-web
+name: Build and deploy full-stack app to Azure Web App - phq9-companion-web
 
 on:
   push:
@@ -14,69 +13,53 @@ jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write      # required for OIDC authentication
+      id-token: write
       contents: read
 
     steps:
-      # --- Checkout repository ---
-      - name: Checkout code
+      # 1️⃣ Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      # --- Setup Node.js environment ---
+      # 2️⃣ Setup Node.js
       - name: Use Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: "20.x"
 
-      # --- Install and build the React client ---
-      - name: Build client (Vite)
+      # 3️⃣ Install + build client
+      - name: Build client app
         run: |
           cd client
-          npm install --include=dev
+          npm ci
           npx vite build
+          cd ..
 
-      # --- Copy build output into server folder ---
+      # 4️⃣ Copy client build into server directory
       - name: Bundle client build into server
         run: |
           mkdir -p server/client/dist
           cp -r client/dist/* server/client/dist/
 
-      # --- Login to Azure ---
-      - name: Log in to Azure
+      # 5️⃣ Login to Azure (OIDC)
+      - name: Login to Azure
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_819F70388E9742ECAB05957B5DAF5056 }}
           tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_52FF2E7F0E274BB3BD0FF968D12A8D01 }}
           subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_3449190E74D84FF6BC3D3C538EADF2BA }}
 
-      # --- Verify Azure login ---
-      - name: Confirm Azure identity
-        run: az account show --output table
-
-      # --- Deploy full application (server + built client) ---
+      # 6️⃣ Deploy to Azure Web App
       - name: Deploy to Azure Web App
         uses: azure/webapps-deploy@v3
         with:
           app-name: "phq9-companion-web"
           slot-name: "Production"
-          package: .
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          package: server
 
-      # --- Post-deployment health check ---
-      - name: Verify deployment health
+      # 7️⃣ Verify health endpoint after deploy
+      - name: Health check
         run: |
-          APP_URL="https://phq9-companion-web.azurewebsites.net/health"
-          echo "🩺 Checking $APP_URL ..."
-          for attempt in {1..3}; do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$APP_URL" || echo "000")
-            echo "Attempt $attempt → HTTP $STATUS"
-            if [ "$STATUS" = "200" ]; then
-              echo "✅ Health check passed on attempt $attempt"
-              exit 0
-            fi
-            echo "⏳ Waiting 10s before retry..."
-            sleep 10
-          done
-          echo "❌ App failed to return HTTP 200 after 3 attempts."
-          exit 1
+          echo "Checking deployment..."
+          sleep 15
+          curl -i https://phq9-companion-web.azurewebsites.net/health || exit 1
