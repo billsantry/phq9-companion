@@ -1,184 +1,178 @@
-// server.js — Wellbeing PulseCheck (PHQ-9 Likert + LLM reflections & guidance)
-// Node 18+ recommended (global fetch). For Node <=16, uncomment the node-fetch shim below.
+// server/server.js — PHQ-9 Companion (Express + static build)
+// CommonJS for local + Azure compatibility. Verbose logging enabled.
 
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-// For Node <=16, uncomment the next two lines:
-// const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
-// global.fetch = fetch;
+const path = require('path');
+const fs = require('fs');
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 
+app.use((req, _res, next) => {
+  console.log(`[REQ] ${req.method} ${req.path}`);
+  next();
+});
+
+// ---- Config ----
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const DEFAULT_MODEL = process.env.OPENAI_MODEL || 'gpt-5-chat-latest';
+const PORT = process.env.PORT || 8080;
 
-// ---------- Hard guardrails (mirror client) ----------
-const SYSTEM_HARD_LIKERT = `
-You are “Wellbeing PulseCheck,” a non-diagnostic clinical assistant.
+// Crisis line (single wording; UI also shows footer)
+const CRISIS_REPLY =
+  'If you’re not feeling safe, you deserve help right now—call or text 988 (U.S.). If danger is immediate, call 911.';
 
-General rules:
-- Never provide diagnosis, treatment, or medical directives. You may share neutral, generic self-care suggestions.
-- If text includes crisis language (suicide/self-harm), say: "If you’re in the U.S., call 988 (or 911 if in immediate danger)." Then stop.
+// ---- Serve static React build ----
+const buildPath = path.join(__dirname, '..', 'client', 'dist');
+if (fs.existsSync(buildPath)) {
+  app.use(express.static(buildPath));
+  console.log('✅ Serving static files from', buildPath);
+} else {
+  console.error('⚠️ React build not found at', buildPath, '— the app will still run but / will 404.');
+}
 
-Questioning rules:
-- Ask EXACTLY ONE short question at a time about the specified PHQ-9 domain (last 2 weeks).
-- Do NOT include answer options, bullets, slashes, or rating words—the UI renders the four PHQ-9 choices.
-- The reply must be a single sentence ending with a question mark.
-
-Reflection rules:
-- When given the user's current PHQ-9 grid, write ONE short sentence (≤25 words) to reflect what’s salient so far. No diagnosis; no advice; no options.
-
-Guidance summary rules:
-- Produce 4–7 sentences, plain language, non-diagnostic.
-- Include: (1) what looks most active, (2) how symptoms might affect daily life, (3) 3–5 practical, low-risk self-care ideas tailored to elevated scores (≥2), (4) when to consider speaking with a professional, (5) if SI>0, include ONE sentence with resources (U.S. 988; 911 if immediate danger).
-`.trim();
-
-const SYSTEM_SUMMARY_ONLY = `
-You are “Wellbeing PulseCheck,” a non-diagnostic clinical assistant.
-Write 4–7 sentences covering: prominent symptoms, day-to-day impact, 3–5 practical low-risk self-care ideas tailored to elevated items (≥2), and when to consider talking to a clinician.
-If SI>0, include exactly one sentence noting 988 (U.S.) and 911 if immediate danger. No diagnosis.
-`.trim();
-
-// ---------- Health checks ----------
-app.get('/health', (_req, res) => res.json({ ok: true, model: DEFAULT_MODEL }));
+// ---- Health checks ----
+app.get('/health', (_req, res) =>
+  res.json({ ok: true, model: DEFAULT_MODEL, static: fs.existsSync(buildPath) })
+);
 app.get('/api/llm', (_req, res) =>
   res.status(405).send('Use POST /api/llm with body: { "messages": [ { role, content }, ... ] }')
 );
 
-// ---------- Helpers ----------
+// ---- Helpers ----
 function extractReply(d) {
-  // 1) Responses API convenience
+  // New Responses API convenience field
   if (typeof d?.output_text === 'string' && d.output_text.trim()) return d.output_text.trim();
 
-  // 2) Structured output[].content[].text
+  // Structured Responses API shape
   if (Array.isArray(d?.output)) {
     const txt = d.output
-      .flatMap(item => (item?.content || []).map(part => part?.text).filter(Boolean))
+      .flatMap((item) => (item?.content || []).map((part) => part?.text).filter(Boolean))
       .join(' ')
       .trim();
     if (txt) return txt;
   }
 
-  // 3) Rare alternates
-  if (typeof d?.content === 'string' && d.content.trim()) return d.content.trim();
-  if (typeof d?.message === 'string' && d.message.trim()) return d.message.trim();
-
-  // 4) Completions-like fallback
-  const choiceMsg = d?.choices?.[0]?.message?.content;
-  if (typeof choiceMsg === 'string' && choiceMsg.trim()) return choiceMsg.trim();
-
+  // Chat Completions shape (fallback)
+  if (typeof d?.choices?.[0]?.message?.content === 'string') {
+    return d.choices[0].message.content.trim();
+  }
   return null;
 }
 
-// Very small, explicit risk-language screen
 const RISK_PATTERNS = [
-  'suicide', 'kill myself', 'end my life', 'can’t go on', "can't go on",
-  'self-harm', 'self harm', 'hurt myself', 'take my life', 'better off dead'
+  'suicide',
+  'kill myself',
+  'end my life',
+  'self-harm',
+  'self harm',
+  'hurt myself',
+  'take my life',
+  'better off dead',
 ];
+
 function containsRiskLanguage(s) {
   const t = (s || '').toLowerCase();
-  return RISK_PATTERNS.some(p => t.includes(p));
+  return RISK_PATTERNS.some((p) => t.includes(p));
 }
 
-// Soft sanitizer for question turns (prevents model from showing options/lists)
-function sanitizeQuestionText(text) {
-  if (!text) return text;
-  const one = text.replace(/\s+/g, ' ').trim();
-  const containsChoices = /Not at all|Several days|More than half the days|Nearly every day/i.test(one);
-  const looksListy = /(?:^|\n)[•\-*\d]+\s/.test(one) || /\/.+\//.test(one) || /:.*,/.test(one);
-  const endsWithQ = one.endsWith('?');
-  const tooLong = one.length > 240 || (one.match(/[.?!]/g) || []).length > 1;
-
-  if ((containsChoices || looksListy || tooLong) && endsWithQ) {
-    return 'Over the last 2 weeks, how often have you been bothered by this area?';
-  }
-  return one;
-}
-
-// ---------- Main LLM relay ----------
+// ---- Main LLM route ----
 app.post('/api/llm', async (req, res) => {
+  const t0 = Date.now();
   try {
     if (!OPENAI_API_KEY) {
       console.error('❌ Missing OPENAI_API_KEY');
-      return res.status(500).send('Missing OPENAI_API_KEY');
+      return res.status(500).json({ error: 'Missing OPENAI_API_KEY' });
     }
 
-    const { messages = [] } = req.body || {};
+    const { messages } = req.body || {};
     if (!Array.isArray(messages) || messages.length === 0) {
+      console.warn('⚠️ /api/llm called without messages');
       return res.status(400).json({ error: '"messages" array required' });
     }
 
-    // ✅ Detect "summary phase" BEFORE crisis guard so we don't suppress guidance.
-    const SUMMARY_HINT_RX =
-      /(PHQ-9 Companion|pre-diagnostic wellbeing companion|Guidance.+low-risk self-care|SI>0.*988|PHQ-9 total\s*:|Write the guidance|Create the 4–7 sentence guidance)/i;
+    const userBlob = messages.filter((m) => m?.role === 'user').map((m) => m?.content || '').join('\n');
+    const hasRisk = containsRiskLanguage(userBlob);
+    console.log('ℹ️ /api/llm request', {
+      count: messages.length,
+      hasRisk,
+      len: userBlob.length,
+    });
 
-    const clientHasSummaryOnly = messages.some(m => SUMMARY_HINT_RX.test(m?.content || ''));
+    // Log risk but DO NOT short-circuit; let the model respond.
+    // The UI will show the crisis box when safety > 0.
+    if (hasRisk) {
+      console.log('⚠️ Risk language present; continuing to call model so UI can handle crisis box.');
+}
 
-    // ✅ Apply crisis guard ONLY on interactive/question turns (not during summary).
-    if (!clientHasSummaryOnly) {
-      const lastUserTurns = messages.filter(m => m?.role === 'user').slice(-4);
-      const recentUserText = lastUserTurns.map(m => m?.content || '').join('\n');
-      if (containsRiskLanguage(recentUserText)) {
-        return res.json({ reply: 'If you’re in the U.S., call 988 (or 911 if in immediate danger).' });
-      }
-    }
+    // Compose input for Responses API
+    const input = [
+      { role: 'system', content: 'You are PHQ-9 Companion, a non-diagnostic wellbeing guide.' },
+      ...messages,
+    ];
 
-    // Choose the system prompt
-    const systemToPrepend = clientHasSummaryOnly ? SYSTEM_SUMMARY_ONLY : SYSTEM_HARD_LIKERT;
-
-    // Build final input
-    const input = [{ role: 'system', content: systemToPrepend }].concat(
-      messages.map(m => ({
-        role: typeof m.role === 'string' ? m.role : 'user',
-        content: typeof m.content === 'string' ? m.content : String(m.content ?? '')
-      }))
-    );
+    const ctrl = new AbortController();
+    const timeout = setTimeout(() => ctrl.abort('Timeout'), 25_000);
 
     const r = await fetch('https://api.openai.com/v1/responses', {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${OPENAI_API_KEY}`,
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
       },
       body: JSON.stringify({
         model: DEFAULT_MODEL,
         input,
-        max_output_tokens: 220,   // ensures full 4–7 sentence guidance
-        temperature: 0.35
-      })
+        max_output_tokens: 260,
+        temperature: 0.35,
+      }),
+      signal: ctrl.signal,
+    }).catch((e) => {
+      console.error('❌ Network/Fetch error to OpenAI:', e);
+      throw e;
     });
 
+    clearTimeout(timeout);
+
     if (!r.ok) {
-      const text = await r.text();
-      console.error('❌ OpenAI error', r.status, text);
-      return res.status(r.status).type('text').send(text);
+      const text = await r.text().catch(() => '(no body)');
+      console.error('❌ OpenAI API error', r.status, text);
+      return res.status(502).json({ error: 'OpenAI error', status: r.status, body: text });
     }
 
-    const data = await r.json();
-    let reply = extractReply(data) || '';
+    const data = await r.json().catch((e) => {
+      console.error('❌ Failed to parse OpenAI JSON:', e);
+      return null;
+    });
 
-    // Sanitize ONLY for question turns
-    if (!clientHasSummaryOnly && reply && reply.trim().endsWith('?')) {
-      reply = sanitizeQuestionText(reply);
+    const reply = extractReply(data);
+    if (!reply) {
+      console.warn('⚠️ OpenAI returned no extractable text, sending fallback');
+      return res.json({
+        reply:
+          'Thanks for completing this check-in. Consider small steps this week and when to check in with a clinician you trust.',
+      });
     }
 
-    // Fallback if model somehow returns nothing during summary
-    if (clientHasSummaryOnly && !reply.trim()) {
-      reply = 'Thanks for completing this check-in. Consider which small changes feel doable this week, and when to check in with a clinician you trust.';
-    }
-
-    res.json({ reply: reply || '(No response)' });
+    console.log('✅ /api/llm ok in', Date.now() - t0, 'ms; chars:', reply.length);
+    return res.json({ reply });
   } catch (err) {
-    console.error('💥 LLM backend failed:', err);
-    res.status(500).send('LLM backend failed');
+    console.error('💥 /api/llm exception:', err);
+    return res.status(500).json({ error: 'Server error', detail: String(err?.message || err) });
   }
-}); // END app.post('/api/llm')
+});
 
-// ---------- Start ----------
-const PORT = process.env.PORT || 3000;
+// ---- SPA fallback (after API routes) ----
+app.get('*', (req, res) => {
+  if (req.path.startsWith('/api/')) return res.status(404).send('Not found');
+  if (!fs.existsSync(buildPath)) return res.status(404).send('Build not found');
+  res.sendFile(path.join(buildPath, 'index.html'));
+});
+
+// ---- Start ----
 app.listen(PORT, () => {
-  console.log('✅ Wellbeing PulseCheck API running on port', PORT, 'model=', DEFAULT_MODEL);
+  console.log(`✅ PHQ-9 Companion running on http://localhost:${PORT}  model=${DEFAULT_MODEL}`);
 });

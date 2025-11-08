@@ -1,24 +1,25 @@
 import React, { useEffect, useRef, useState } from "react";
 
-/** PHQ-9 Companion — Pre-diagnostic wellbeing companion (v8.3.3)
- * - Numbered canonical questions (1..10), split safety 9a/9b
- * - Likert buttons (no preselect across questions)
- * - Recap rendered as a multi-line list
- * - If safety > 0: remove crisis line from LLM guidance; show it ONLY in a bordered caution box
- * - Bold first sentence + any 988/911 references
- * - Safe rich text rendering (no dangerouslySetInnerHTML)
- * - Assistant bubbles background rgb(16 20 38), no border
- * - Solid background + stable container (no layout jiggle)
+/** PHQ-9 Companion — Pre-diagnostic wellbeing companion (v8.4.1)
+ *  - Filters “Safety” lines before LLM call (prevents truncation)
+ *  - Keeps only modal + footer disclaimers
+ *  - Verbose logging for debugging
  */
 
 async function callLLM(messages, apiUrl = "/api/llm") {
+  console.debug("[callLLM] →", messages);
   const res = await fetch(apiUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ messages }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) {
+    const text = await res.text().catch(() => "(no body)");
+    console.error("[callLLM] HTTP", res.status, text);
+    throw new Error(text || `HTTP ${res.status}`);
+  }
   const json = await res.json();
+  console.debug("[callLLM] ←", json);
   if (!json || typeof json.reply !== "string") throw new Error("Bad LLM payload");
   return json.reply.trim();
 }
@@ -53,7 +54,7 @@ function ConsentModal({ open, onAccept }) {
   );
 }
 
-// --- PHQ-9 domains -----------------------------------------------------------
+// ---- PHQ-9 domains ----
 const DOMAINS = [
   { id: "interest", label: "Interest", canonical: "Over the last 2 weeks, how often have you been bothered by little interest or pleasure in doing things?" },
   { id: "mood", label: "Mood", canonical: "Over the last 2 weeks, how often have you been bothered by feeling down, depressed, or hopeless?" },
@@ -82,51 +83,48 @@ function severityFromTotal(total) {
   return "Severe (20–27)";
 }
 
+// ---- Focused system prompt ----
 const SYSTEM_SUMMARY_ONLY = `
-You are “PHQ-9 Companion,” an empathetic pre-diagnostic wellbeing coach that helps a person reflect on their mood patterns using PHQ-9 data.
+You are “PHQ-9 Companion,” a friendly wellbeing reflection guide.
+Write two short paragraphs (4–7 sentences total) summarizing the person’s recent mood and energy patterns.
 
-You will be given the user’s question responses, PHQ-9 total score, and severity band (Minimal, Mild, Moderate, Moderately severe, or Severe).
-
-Your job:
-1. Write a short, conversational reflection (4–7 sentences) that feels supportive, never clinical.
-2. Highlight 2–3 themes you observe from their answers (for example, low energy, loss of interest, or poor sleep).
-3. Briefly describe how these may be affecting day-to-day life, using accessible language (“you may find it harder to concentrate at work or enjoy social time”).
-4. Offer 3–5 gentle, evidence-based self-care or coping ideas linked to their elevated items (score ≥2). Examples include physical activity, social connection, journaling, healthy sleep routine, balanced meals, or short mindfulness breaks.
-5. Adjust tone and urgency:
-   - If total <10 → encouraging and normalizing.
-   - 10–14 → validating and proactive (“small steps can make a difference”).
-   - 15–19 → emphasize seeking support (“consider checking in with a trusted professional or counselor”).
-   - ≥20 or any safety >0 → stay calm but direct, including exactly one sentence with crisis options (988 in the U.S., 911 if immediate danger).
-6. End with a short motivational statement that reinforces agency (“small changes can add up,” “you deserve support,” etc.).
-
-Rules:
-- Never diagnose or label the person.
-- Avoid clinical jargon or the word “patient.”
-- Avoid repeating question text verbatim.
-- Avoid stray characters, prefixes, or tokens like “S.”.
-- Keep natural paragraph spacing, 2–3 short paragraphs max.
+Do all of the following:
+• Reflect what may be most challenging right now in everyday language.
+• Identify 2–3 key patterns (e.g., low energy, restless sleep, difficulty focusing).
+• Describe how these may affect motivation, relationships, or work.
+• Offer 3–5 gentle, low-risk wellbeing ideas (sleep routine, short walks, journaling, balanced meals, mindful breaks).
+• Keep tone warm and supportive. Avoid any phone numbers or crisis text.
+• End with a motivating line (“small changes add up,” “you deserve care,” etc.).
 `.trim();
 
-// --- Rich text helpers --------------------------------------------------------
+// ---- Text helpers ----
 function makeRecapParts(text) {
-  const crisis = /(988|911|immediate danger)/i;
   return String(text)
     .split("\n")
-    .map((t) => ({ text: t, bold: crisis.test(t), block: true }));
+    .map((t) => ({ text: t, bold: /(988|911)/i.test(t), block: true }));
 }
 
 function makeGuidanceParts(t, { omitCrisis } = {}) {
   const crisis = /(988|911|immediate danger)/i;
-  const sents = t.match(/[^.!?]+[.!?]/g) || [t];
-  const filtered = omitCrisis ? sents.filter((s) => !crisis.test(s)) : sents;
-  return filtered.map((s, i) => ({
-    text: s.trim() + (i < filtered.length - 1 ? " " : ""),
-    bold: i === 0 || (!omitCrisis && crisis.test(s)),
-    block: false,
-  }));
+  const paras = String(t).trim().split(/\n\s*\n/).filter(Boolean);
+  const parts = [];
+  paras.forEach((para, pi) => {
+    const sents = para.match(/[^.!?]+[.!?]/g) || [para];
+    sents.forEach((s, si) => {
+      const isCrisis = crisis.test(s);
+      if (omitCrisis && isCrisis) return;
+      parts.push({
+        text: s.trim() + (si < sents.length - 1 ? " " : ""),
+        bold: (pi === 0 && si === 0) || (!omitCrisis && isCrisis),
+        block: false,
+      });
+    });
+    parts.push({ text: "", bold: false, block: true });
+  });
+  return parts;
 }
 
-// --- Main component ----------------------------------------------------------
+// ---- Main component ----
 export default function App() {
   const [consented, setConsented] = useState(false);
   const [chat, setChat] = useState([]);
@@ -135,8 +133,6 @@ export default function App() {
   const [finished, setFinished] = useState(false);
   const [loading, setLoading] = useState(false);
   const scrollRef = useRef(null);
-
-  // NEW: track selected option per question; reset on advance to avoid bias
   const [selectedOption, setSelectedOption] = useState(null);
 
   useEffect(() => {
@@ -148,7 +144,6 @@ export default function App() {
       pushAssistant("I’ll ask 10 short questions about the past two weeks. Please choose one answer for each.");
       pushQuestion(0);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [consented]);
 
   function push(m) { setChat((c) => [...c, m]); }
@@ -158,8 +153,7 @@ export default function App() {
   function pushQuestion(qIndex) {
     const d = DOMAINS[qIndex];
     if (!d) return;
-    const number = `${qIndex + 1}. `;
-    pushAssistant(number + d.canonical);
+    pushAssistant(`${qIndex + 1}. ${d.canonical}`);
   }
 
   async function handlePick(opt) {
@@ -167,20 +161,13 @@ export default function App() {
     const cur = DOMAINS[idx];
     const nextAnswers = { ...answers, [cur.id]: { label: opt.label, score: opt.score } };
     setAnswers(nextAnswers);
-
-    // visually mark current selection
     setSelectedOption(opt.key);
-
     push({ role: "user", content: opt.label });
 
     if (idx < DOMAINS.length - 1) {
-      const nextIndex = idx + 1;
-      setIdx(nextIndex);
-
-      // reset selection for the next question (no preselect/bias)
+      setIdx(idx + 1);
       setSelectedOption(null);
-
-      pushQuestion(nextIndex);
+      pushQuestion(idx + 1);
     } else {
       await finish(nextAnswers);
     }
@@ -212,22 +199,20 @@ export default function App() {
 
     try {
       setLoading(true);
-      const msgs = [
+      const recapNoSafety = recap.replace(/Safety[\s\S]*/gi, "");
+      console.debug("[finish] recapNoSafety →", recapNoSafety);
+
+      const llm = await callLLM([
         { role: "system", content: SYSTEM_SUMMARY_ONLY },
-        { role: "user", content: recap },
-        { role: "user", content: `PHQ-9 total: ${total} (${band}). Write the guidance.` },
-      ];
-      const llm = await callLLM(msgs);
+        { role: "user", content: recapNoSafety },
+      ]);
 
-      const cleanLLM = llm
-        .replace(/\bS\.\s*$/i, "")    // trims stray trailing "S." if present
-        .replace(/\bS\.\s+/g, "")     // removes stray "S. " mid-text
-        .replace(/(\s){2,}/g, " ")
-        .trim();
-
-      const guidanceParts = makeGuidanceParts(cleanLLM, { omitCrisis: safety > 0 });
+      console.debug("[finish] LLM reply ←", llm);
+      const guidanceParts = makeGuidanceParts(llm, { omitCrisis: safety > 0 });
       pushAssistantParts(guidanceParts);
-    } catch {
+
+    } catch (err) {
+      console.error("[finish] LLM error:", err);
       pushAssistant("Thanks for completing this check-in. If symptoms persist or affect daily life, consider speaking with a clinician you trust.");
     } finally {
       setLoading(false);
@@ -238,11 +223,11 @@ export default function App() {
         role: "assistant",
         box: true,
         parts: [
-          { text: "Because you noted thoughts of self-harm, it’s important to reach out for support—if you ever feel unsafe or might act on these thoughts, call or text " },
+          { text: "If you’re not feeling safe, you deserve help right now—call or text " },
           { text: "988", bold: true },
-          { text: " in the U.S., or " },
+          { text: " (U.S.). If danger is immediate, call " },
           { text: "911", bold: true },
-          { text: " if you are in immediate danger.", bold: true },
+          { text: "." },
         ],
       });
     }
@@ -264,15 +249,12 @@ export default function App() {
             {chat.map((m, i) => {
               const base = { ...S.bubble, ...(m.role === "assistant" ? S.bubbleAssistant : S.bubbleUser) };
               const style = m.box ? { ...base, ...S.cautionBox } : base;
-
               if (m.parts) {
                 return (
                   <div key={i} style={style}>
                     {m.parts.map((p, j) =>
                       p.block ? (
-                        <div key={j}>
-                          {p.bold ? <strong>{p.text}</strong> : <span>{p.text}</span>}
-                        </div>
+                        <div key={j}>{p.bold ? <strong>{p.text}</strong> : <span>{p.text}</span>}</div>
                       ) : p.bold ? (
                         <strong key={j}>{p.text}</strong>
                       ) : (
@@ -282,7 +264,6 @@ export default function App() {
                   </div>
                 );
               }
-
               return <div key={i} style={style}>{m.content}</div>;
             })}
             {loading && <div style={{ fontSize: 12, color: "#cbd5e1" }}>Assistant is typing…</div>}
@@ -293,16 +274,11 @@ export default function App() {
               {OPTIONS.map((o) => (
                 <button
                   key={o.key}
-                  className="phq-option"
                   style={{
                     ...S.optionBtn,
-                    background:
-                      selectedOption === o.key
-                        ? "rgba(56,189,248,.3)" // highlighted only for current question
-                        : "rgba(2,6,23,.4)",
+                    background: selectedOption === o.key ? "rgba(56,189,248,.3)" : "rgba(2,6,23,.4)",
                   }}
                   onClick={() => handlePick(o)}
-                  aria-label={o.label}
                 >
                   {o.label}
                 </button>
@@ -322,47 +298,26 @@ export default function App() {
   );
 }
 
-// --- Styles ------------------------------------------------------------------
+// ---- Styles ----
 const S = {
   page: {
     minHeight: "100vh",
-    background: "#0b1220", // solid page bg
+    background: "#0b1220",
     color: "#e5e7eb",
     display: "flex",
     justifyContent: "center",
     alignItems: "flex-start",
     padding: "2rem 4vw",
   },
-  container: {
-    width: "100%",
-    maxWidth: "1600px",
-    margin: "0 auto",
-  },
+  container: { width: "100%", maxWidth: "1600px", margin: "0 auto" },
   header: { display: "flex", justifyContent: "space-between", marginBottom: 16, alignItems: "center" },
   badge: { marginLeft: 8, fontSize: 12, padding: "2px 8px", border: "1px solid #334155", borderRadius: 8 },
-  card: { padding: 16, border: "1px solid #1f2937", borderRadius: 12, background: "#0f172a" }, // solid card bg
-  scroll: {
-    display: "flex",
-    flexDirection: "column",
-    gap: 8,
-    maxHeight: "65vh",
-    overflow: "auto",
-    paddingRight: 4,
-    scrollbarGutter: "stable both-edges", // prevents horizontal jiggle
-  },
+  card: { padding: 16, border: "1px solid #1f2937", borderRadius: 12, background: "#0f172a" },
+  scroll: { display: "flex", flexDirection: "column", gap: 8, maxHeight: "65vh", overflow: "auto", paddingRight: 4 },
   bubble: { maxWidth: "85%", padding: 12, border: "1px solid #334155", borderRadius: 12, whiteSpace: "pre-wrap" },
   bubbleUser: { marginLeft: "auto", background: "rgba(30,41,59,.7)" },
   bubbleAssistant: { background: "rgb(16 20 38)", border: "none" },
-  cautionBox: {
-    border: "1px solid #e5e7eb",
-    background: "rgba(255,255,255,0.05)",
-    color: "#e5e7eb",
-    marginTop: 16,
-    padding: 12,
-    borderRadius: 10,
-    fontSize: 14,
-    whiteSpace: "pre-wrap",
-  },
+  cautionBox: { border: "1px solid #e5e7eb", background: "rgba(255,255,255,0.05)", padding: 12, borderRadius: 10 },
   optionsGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 12 },
   optionBtn: {
     border: "1px solid #334155",
@@ -372,19 +327,9 @@ const S = {
     borderRadius: 10,
     fontWeight: 600,
     cursor: "pointer",
-    transition: "border-color .2s ease, transform .14s ease",
   },
   modalBackdrop: { position: "fixed", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,.45)", backdropFilter: "blur(2px)", padding: 16 },
   modalCard: { maxWidth: 640, border: "1px solid #1f2937", borderRadius: 12, background: "#020617", padding: 16 },
-  noticeBox: { fontSize: 14, border: "1px solid rgba(146,64,14,.4)", background: "rgba(120,53,15,.15)", borderRadius: 8, padding: 12, marginTop: 8, marginBottom: 8 },
+  noticeBox: { fontSize: 14, border: "1px solid rgba(146,64,14,.4)", background: "rgba(120,53,15,.15)", borderRadius: 8, padding: 12, margin: "8px 0" },
   checkboxRow: { display: "flex", alignItems: "center", gap: 8, fontSize: 14 },
-  button: {
-    border: "1px solid #334155",
-    background: "rgba(2,6,23,.6)",
-    color: "#e5e7eb",
-    padding: "8px 12px",
-    borderRadius: 10,
-    fontWeight: 600,
-    cursor: "pointer",
-  },
 };
