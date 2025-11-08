@@ -1,4 +1,5 @@
-# PHQ-9 Companion — Build and deploy Node/React full-stack app to Azure Web App
+# PHQ-9 Companion — Full stack build + deploy (React + Node)
+# Uses Azure OIDC authentication for secure CI/CD
 # Docs: https://github.com/Azure/webapps-deploy
 
 name: Build and deploy Node.js app to Azure Web App - phq9-companion-web
@@ -10,54 +11,39 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  build-and-deploy:
     runs-on: ubuntu-latest
     permissions:
+      id-token: write      # required for OIDC authentication
       contents: read
 
     steps:
-      - name: Checkout repository
+      # --- Checkout repository ---
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
+      # --- Setup Node.js environment ---
+      - name: Use Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: "20.x"
 
-      # --- Build React client ---
-      - name: Install and build client
+      # --- Install and build the React client ---
+      - name: Build client (Vite)
         run: |
           cd client
           npm ci
           npm run build
+        env:
+          NODE_ENV: production
 
-      # --- Copy build output into server ---
-      - name: Copy client build into server
+      # --- Copy build output into server folder ---
+      - name: Bundle client build into server
         run: |
           mkdir -p server/client/dist
           cp -r client/dist/* server/client/dist/
 
-      # --- Upload built app for deployment ---
-      - name: Upload artifact for deployment
-        uses: actions/upload-artifact@v4
-        with:
-          name: phq9-app
-          path: server/
-
-  deploy:
-    runs-on: ubuntu-latest
-    needs: build
-    permissions:
-      id-token: write      # Required for Azure OIDC auth
-      contents: read
-
-    steps:
-      - name: Download artifact from build
-        uses: actions/download-artifact@v4
-        with:
-          name: phq9-app
-
-      # --- Login to Azure via OIDC ---
+      # --- Login to Azure ---
       - name: Log in to Azure
         uses: azure/login@v2
         with:
@@ -65,33 +51,34 @@ jobs:
           tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_52FF2E7F0E274BB3BD0FF968D12A8D01 }}
           subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_3449190E74D84FF6BC3D3C538EADF2BA }}
 
-      # --- Verify Azure connection ---
-      - name: Verify Azure connection
-        run: |
-          echo "✅ Azure login successful. Account details:"
-          az account show --output table
-        shell: bash
+      # --- Verify Azure login ---
+      - name: Confirm Azure identity
+        run: az account show --output table
 
-      # --- Deploy to Azure Web App ---
+      # --- Deploy full application (server + built client) ---
       - name: Deploy to Azure Web App
-        id: deploy-to-webapp
         uses: azure/webapps-deploy@v3
         with:
           app-name: "phq9-companion-web"
           slot-name: "Production"
           package: .
-
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
       # --- Post-deployment health check ---
-      - name: Health check
+      - name: Verify deployment health
         run: |
-          echo "🩺 Checking app health..."
-          curl -s -o /dev/null -w "%{http_code}" https://phq9-companion-web.azurewebsites.net/health | tee health_status.txt
-          if grep -q "200" health_status.txt; then
-            echo "✅ App responded with HTTP 200 (healthy)."
-          else
-            echo "❌ Health check failed."
-            exit 1
-          fi
+          APP_URL="https://phq9-companion-web.azurewebsites.net/health"
+          echo "🩺 Checking $APP_URL ..."
+          for attempt in {1..3}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$APP_URL" || echo "000")
+            echo "Attempt $attempt → HTTP $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ Health check passed on attempt $attempt"
+              exit 0
+            fi
+            echo "⏳ Waiting 10s before retry..."
+            sleep 10
+          done
+          echo "❌ App failed to return HTTP 200 after 3 attempts."
+          exit 1
