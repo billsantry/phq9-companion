@@ -30,7 +30,7 @@ jobs:
 
       # --- Install and build the React client ---
       - name: Build client (Vite)
-          run: |
+        run: |
           cd client
           npm install --include=dev
           npx vite build
@@ -80,4 +80,3 @@ jobs:
           done
           echo "❌ App failed to return HTTP 200 after 3 attempts."
           exit 1
-
