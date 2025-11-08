@@ -26,7 +26,7 @@ const CRISIS_REPLY =
   'If you’re not feeling safe, you deserve help right now—call or text 988 (U.S.). If danger is immediate, call 911.';
 
 // ---- Serve static React build ----
-const buildPath = path.join(__dirname, '..', 'client', 'dist');
+const buildPath = path.join(__dirname, 'client', 'dist');
 if (fs.existsSync(buildPath)) {
   app.use(express.static(buildPath));
   console.log('✅ Serving static files from', buildPath);
